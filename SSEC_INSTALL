@@ -1,0 +1,1196 @@
+#!/bin/sh
+
+##########################################################
+#                  CONSOLE IP Setup                      #
+##########################################################
+homeDir="" 		#install Directory (ex: /opt)
+porta=30041		#Listen Port (ex: 30041)
+pcip="" 		#Console IP (ex: 10.10.10.11)
+pcip2="" 		#Console IP2 
+NATUse= 		#Port listen or less ( 0:Listen 1:Less )
+NATSleepTime=60 	#NAT Confirmation time between agent and console in NAT environment
+KEEPALIVE=1200		#NAT KeepAlive Sleep TIme
+NATAccount="" 		#NAT Account
+NATCloudUse=0
+CloudCategory="AWS AZURE NAVER GOOGLE KT ORACLE SKT LGU"
+SelectCloudCode=0
+SelectCloudVendor=""
+index=0
+an="y" 			#agent start (ex: y/n)
+PATH_NAME=`pwd`				#install module path
+#PATH_NAME="/tmp/sse_agent_unix"	#
+SYTEMCTL_USE=0
+# CIDR range
+cidr_range=""		#ex:"1.1.1.0/24,10.10.60.0/24"
+version=20231201 	#agent version
+##########################################################
+
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/etc:/usr/ccs/bin:.
+export PATH
+
+ECHO="echo"
+
+OS=`uname`
+
+if [ "$OS" = "Linux" -o "$OS" = "FreeBSD" ]; then
+	EchoTest=`echo -e "\n"|grep -v grep|grep "\-e"`
+	if [ $? -eq 0 ]; then
+		ECHO="echo"
+	else
+		ECHO="echo -e"
+	fi
+fi
+
+# 함수: IP 주소를 숫자로 변환
+ip_to_int() {
+    local ip="$1"
+    local a b c d
+
+    IFS=. read -r a b c d <<< "$ip"
+    echo $((a * 256 ** 3 + b * 256 ** 2 + c * 256 + d))
+}
+
+# 함수: CIDR 범위에 속하는지 확인
+ip_in_cidr() {
+    local ip="$1"
+    local cidr="$2"
+
+    local network mask
+    IFS='/' read -r network mask <<< "$cidr"
+
+    local ip_int=$(ip_to_int "$ip")
+    local network_int=$(ip_to_int "$network")
+    local mask_int=$((2 ** (32 - mask) - 1))
+
+    local lower_limit=$((network_int & ~mask_int))
+    local upper_limit=$((lower_limit + mask_int))
+
+    if ((ip_int >= lower_limit && ip_int <= upper_limit)); then
+	return  0
+    else
+	return  9
+    fi
+}
+# 함수: 주어진 문자열이 정수인지 확인
+is_integer() {
+	[[ "$1" =~ ^[0-9]+$ ]]
+}
+
+# 함수: IP 주소 유효성 검사
+validate_ip() {
+	local ip="$1"
+	IFS='.' read -ra parts <<< "$ip"
+
+	# IP 주소는 4 부분으로 나누어져야 함
+	if [[ "${#parts[@]}" -ne 4 ]]; then
+		return 0
+	fi
+
+	# 각 부분이 0에서 255 사이의 정수여야 함
+	for part in "${parts[@]}"; do
+		if ! is_integer "$part" || ((part < 0)) || ((part > 255)); then
+			return 0
+		fi
+	done
+	return 1
+}
+
+if [ x"$cidr_range" != x ]; then
+	OLD_IFS="$IFS"
+	# 입력된 IP 주소
+	ipcommand=`type -P ifconfig`
+	findf=0
+	if [ -f $ipcommand ]; then
+		ipresult=`$ipcommand | grep 'inet\s' | grep -v 127.0.0.1 | awk '{print $2}' | sed -e 's/addr://g'`
+		for ipL in $ipresult
+		do
+			validate_ip "$ipL"
+			if [ $? -eq 1 ]; then
+				IFS=","
+				parsed_array=($cidr_range)
+				IFS="$OLD_IFS"
+				for element in "${parsed_array[@]}"; do
+					$(ip_in_cidr "$ipL" "$element")
+					NATUse=$?
+					if [ $NATUse -eq 0 ]; then
+						findf=1
+						break
+					fi
+				done
+			fi
+			if [ $findf -eq 1 ]; then
+				break
+			fi
+		done
+	else
+		$ECHO "ifconfig not found"
+	fi
+	IFS="$OLD_IFS"
+fi
+
+error()
+{
+	$ECHO "*** SSE Agent Installation was terminated abnormally. Please try again."
+	$ECHO "    If the problem persists, please contact Nilsoft.(02-783-0961)"
+	exit
+}
+complete()
+{
+	$ECHO " "
+
+        $ECHO "\n*** Secuguard SSE Agent set configuration.\n"
+
+	if [ `echo $pcip | awk '{ print length }'` -eq 0 ]; then
+		$ECHO "\n\n*** Set agent console information.";
+		$ECHO "\n* Input SSEC Console (PC) IP: \c";
+		read pcip;
+		if [ x"$pcip" = x ]; then
+			pcip="192.168.0.1"
+		fi
+	else
+		$ECHO "\n\n*** Set agent console information.";
+		$ECHO "\n* Set SSE Console (PC) IP($pcip).";
+	fi
+
+	portc="8080"
+
+  # sse.console 
+	$ECHO "[$pcip]" > $ssehome/config/sse.console
+	$ECHO "ATTR=1" >> $ssehome/config/sse.console
+	$ECHO "MAC=" >> $ssehome/config/sse.console
+	$ECHO "PASSWD=" >> $ssehome/config/sse.console
+	$ECHO "PORT=$portc" >> $ssehome/config/sse.console
+
+	if [ x"$pcip2" != x ] ; then
+		$ECHO "[$pcip2]" >> $ssehome/config/sse.console
+		$ECHO "ATTR=1" >> $ssehome/config/sse.console
+		$ECHO "MAC=" >> $ssehome/config/sse.console
+		$ECHO "PASSWD=" >> $ssehome/config/sse.console
+		$ECHO "PORT=$portc" >> $ssehome/config/sse.console
+	fi
+
+
+ # install.log 
+      date +"%Y%m%d%H%M" > $ssehome/config/install.log
+
+	if echo $osname | grep '^AIX*' > /dev/null ; then
+		$ECHO "\n\n\n*** Executing 'sh $ssehome/S99ssed start' will start SSE Agent.\n"
+	else
+		if $ECHO $osname | grep '^FREE*' > /dev/null ; then
+			rcfile=$rcdir/S99ssed.sh
+		else
+			rcfile=$rcdir/S99ssed
+		fi
+		$ECHO "\n\n\n*** Executing 'sh $ssehome/S99ssed start' will start SSE Agent.\n"
+	fi
+
+	if [ x"$an" = x ] ; then
+		$ECHO "\n*** Would you like start Secuguard SSE Agent?(y/n):\c"
+                read an; 
+	fi
+
+	if [ "$an" = 'y' -o "$an" = 'Y' ]; then
+		if $ECHO $osname | grep '^FREE*' > /dev/null ; then
+                       	sh $ssehome/S99ssed.sh start
+			sleep 1
+		else
+                       	sh $ssehome/S99ssed start
+			sleep 1
+		fi
+	fi
+
+	$ECHO "\n\n*** Installation of SSE Agent Release ${version} is completed."
+	$ECHO "\n*** You can run $rmfile to delete SSE Agent.\n\n\n"
+
+  # Check installed 
+	$ECHO "# ps -ef | grep ssed"
+	ps -ef | grep ssed
+	sleep 1
+
+	if [ $NATUse -eq 0 ]; then
+		if [ -f /usr/sbin/ss ]; then
+			$ECHO "# /usr/sbin/ss -ant | grep $porta"
+			/usr/sbin/ss -ant | grep $porta
+		elif [ -f /bin/ss ]; then
+			$ECHO "# /bin/ss -ant | grep $porta"
+			/bin/ss -ant | grep $porta
+		else
+			$ECHO "# netstat -an | grep $porta"
+			netstat -an | grep $porta
+		fi
+#	elif [ $NATUse -eq 9 ]; then
+#		sleep 1
+#		if [ -f /usr/sbin/ss ]; then
+#			$ECHO "# /usr/sbin/ss -ant | grep $portc |grep ESTAB | grep '$pcip:$portc[[:space:]]*$'"
+#			count=0
+#			while [ $count -ne 20 ];
+#			do
+#				ss_result=`/bin/sh -c "/usr/sbin/ss -ant | grep $portc | grep ESTAB | grep '$pcip:$portc[[:space:]]*$'"`
+#				if [ x"$ss_result" != x ]; then
+#					$ECHO $ss_result
+#					break
+#				fi
+#				sleep 3
+#				count=$(($count+1))
+#			done
+#		elif [ -f /bin/ss ]; then
+#			$ECHO "# /bin/ss -ant | grep $portc |grep ESTAB | grep '$pcip:$portc[[:space:]]*$'"
+#			count=0
+#			while [ $count -ne 20 ];
+#			do
+#				ss_result=`/bin/sh -c "/bin/ss -ant | grep $portc | grep ESTAB | grep '$pcip:$portc[[:space:]]*$'"`
+#				if [ x"$ss_result" != x ]; then
+#					$ECHO $ss_result
+#					break
+#				fi
+#				sleep 3
+#				count=$(($count+1))
+#			done
+#		else
+#			$ECHO "# netstat -an | grep '$pcip:$portc[[:space:]]*ESTABLISHED[[:space:]]*$'"
+#			count=0
+#			while [ $count -ne 20 ];
+#			do
+#				nets_result=`/bin/sh -c "netstat -an | grep '$pcip:$portc[[:space:]]*ESTABLISHED[[:space:]]*$'"`
+#				if [ x"$nets_result" != x ]; then
+#					$ECHO $nets_result
+#					break
+#				fi
+#				sleep 3
+#				count=$(($count+1))
+#			done
+#		fi
+	fi
+	sleep 1
+
+	echo
+
+}
+
+insf()
+{
+	srcfile=$PATH_NAME/$1
+
+	if [ ! -f $srcfile ] ; then
+		$ECHO "*** There is no $srcfile."
+		error
+	fi
+
+	$ECHO "\n*** Install Secuguard SSE Agent Release ${version}.\n"
+	if [ x"$homeDir" = x ] ; then
+		$ECHO "*1. Input SSE Agent install directory[/opt]: \c"; 
+		read dir;
+		if [ x"$dir" != x ] ; then
+			insdir=$dir
+		else
+			insdir="/opt"
+		fi
+
+		if [ ! -d $insdir ] ; then
+			$ECHO "*** There is no $insdir or is no directory."
+			error
+		fi
+	else
+		$ECHO "*1. SSE Agent is installed in [$homeDir]."
+		insdir=$homeDir
+		if [ -f $insdir ] ; then
+			$ECHO "*** $insdir is exists."
+			error
+		elif [ ! -d $insdir ] ; then
+			$ECHO "Create [$insdir] directory."
+			mkdir -p -m 755 $insdir
+		fi
+	fi
+
+	ssehome=$insdir/SSExplorer
+	if [ -d $ssehome ]; then
+		$ECHO "*** $ssehome is exists. If you continue to install, SSE Agent will be overwritten."
+		$ECHO "\n*** Continue? (y/n) \c"; read ans
+		if [ "$ans" = 'y' -o "$ans" = 'Y' ]; then
+			$ECHO ""
+		else
+			error
+		fi
+	fi
+
+	serial=0123456789012345
+
+	if [ x"$porta" = x ]; then
+		$ECHO "\n*2. Enter the port number that SSE daemon will use.[30041]: \c"
+		read porta;
+		if [ x"$porta" = x ]; then
+			porta=30041
+		fi
+	else
+		$ECHO "*2. SSE daemon uses [$porta]."
+	fi
+	
+	if [ x"$NATUse" = x ]; then
+		$ECHO "\n*3. Do you want to use the portless way?(default n) ?:(y/n) \c"
+       		read NATUse;
+        	if [ "$NATUse" = y -o "$NATUse" = 'Y' ]; then
+                #	NATUse='1'
+				$ECHO "\n*4. Please select the way that the connecting or session? :(1:connecting,9:sesstion) \c"
+				read NATUse;
+				if [ x"$NATUse" = x ];
+					then
+					NATUse=0
+				fi
+
+				if [ $NATUse -eq 1 -o $NATUse -eq 9 ]; then
+					$ECHO "NAT : $NATUse"
+				else
+					NATUse=0
+					$ECHO "NAT is not setup : $NATUse"
+				fi
+				
+        		$ECHO "\n*4.1 Set Portless Wait Time:(connecting:60,session:10) \c"
+				read NATSleepTime;
+
+				if [ x"$NATSleepTime" = x ];
+				then
+					if [ $NATUse -eq 9 ]; then
+						NATSleepTime=10
+					else
+						NATSleepTime=60
+					fi
+				fi
+
+				#RESULT=${NATSleepTime//[0-9]/}
+				RESULT=`echo ${NATSleepTime} | /bin/sed "s/[0-9]//g"`
+#echo $RESULT
+				if [ x"$RESULT" != x ];
+				then
+					if [ $NATUse -eq 9 ]; then
+						NATSleepTime=10
+					else
+						NATSleepTime=60
+					fi
+				fi
+
+				if [ $NATUse -eq 9 ]; then
+					if [ "$NATSleepTime" -lt 10 ]; then
+						NATSleepTime=10
+					fi
+				else
+					if [ "$NATSleepTime" -lt 60 ]; then
+						NATSleepTime=60
+					fi
+				fi
+				echo "sleep time : $NATSleepTime"
+
+				$ECHO "\n*4.2 Set KeepAlive Wait Time:(default:1200 Min:600) \c"
+				read KEEPALIVE;
+
+				if [ x"$KEEPALIVE" = x ];
+				then
+					KEEPALIVE=1200
+				fi
+
+				RESULT=`echo ${KEEPALIVE} | /bin/sed "s/[0-9]//g"`
+				if [ x"$RESULT" != x ];
+				then
+					KEEPALIVE=1200
+				fi
+				if [ "$KEEPALIVE" -lt 600 ]; then
+					KEEPALIVE=600
+				fi
+				$ECHO "keep alive time : $KEEPALIVE"
+
+
+				$ECHO "\n*4.3 Set NAT Account :(Default : NULL) \c"
+				read NATAccount;
+
+				$ECHO "\n*4.4 Would you like to run it as an agent for cloud?(Default n):(y/n) \c"
+				read NATCloudUse;
+				if [ "$NATCloudUse" = 'y' -o "$NATCloudUse" = 'Y' ]; then
+					NATCloudUse=1
+					$ECHO "********************************************************************"
+					$ECHO "*                                                                  *"
+					$ECHO "*                      cloud category                              *"
+					$ECHO "*                                                                  *"
+					$ECHO "*------------------------------------------------------------------*"
+					index=0
+					for word in $CloudCategory
+					do
+						index=`expr $index + 1`
+						$ECHO "  $index. $word"
+					done
+					$ECHO "*------------------------------------------------------------------*"
+					$ECHO "********************************************************************"
+
+					$ECHO "\n*5. Please select a cloud type.: \c"
+					read SelectCloudCode;
+
+					index=0
+					for word in $CloudCategory
+					do
+						index=`expr $index + 1`
+						if [ $index -eq $SelectCloudCode ];
+						then
+							SelectCloudVendor=$word;
+						fi
+					done
+					if [ x"$SelectCloudVendor" = x ]; then
+						SelectCloudCode=0
+						NATCloudUse=0
+					fi
+				else
+					NATCloudUse=0
+				fi			
+        	else
+				NATUse='0'
+        	fi
+	fi
+
+	# Install
+	$ECHO "\n\n*** Copy the SSE Agent files.\n"
+	(cd $insdir; tar xvf $srcfile)
+	if [ $? -ne 0 ]; then
+		error
+	fi
+
+	# Result Install
+	if [ ! -d $ssehome ]; then
+		error
+	fi
+
+	# Create sse.config file
+	conffile=$ssehome/config/sse.config
+	$ECHO "\n\n*** Create SSE Agent config file($conffile)... \c"
+
+	$ECHO "[CURRENT]" > $conffile
+	$ECHO "SERIAL=$serial" >> $conffile
+	$ECHO "VERSION=$version" >> $conffile
+	$ECHO "OSNAME=$osname" >> $conffile
+	$ECHO "OSID=$osid" >> $conffile
+	$ECHO "PORT=$porta" >> $conffile
+	$ECHO "TIMEOUT=10" >> $conffile
+	$ECHO "MAXCHILD=1" >> $conffile
+	$ECHO "NEWCONSOLE=1" >> $conffile
+	#$ECHO "IPV6=$IPV6_USE" >> $conffile
+	$ECHO "NAT=$NATUse" >> $conffile
+	$ECHO "NAT_SLEEP=$NATSleepTime" >> $conffile
+	$ECHO "KEEPALIVE=$KEEPALIVE" >> $conffile
+	if [ x"$NATAccount" != x ] ; then
+		$ECHO "NAT_ACCOUNT=$NATAccount" >> $conffile
+	fi
+	$ECHO "Complete"
+
+	# sse.cloud file create
+	if [ $NATCloudUse -eq 1 ];then
+		conffile=$ssehome/config/sse.cloud
+		$ECHO "\n\n*** SSE Agent Cloud config($conffile) file is generated... \c"
+
+		$ECHO "[CLOUD]" > $conffile
+		$ECHO "VENDOR=$SelectCloudVendor" >> $conffile
+		$ECHO "CODE=$SelectCloudCode" >> $conffile
+		$ECHO "Completed"
+	fi
+	
+	#rc file copy
+	
+	if $ECHO $osname | grep '^AIX*' > /dev/null ; then
+		$ECHO "\n*** Register in the inittab file for SSE Agent... \c" 
+		if [ -f /usr/sbin/mkitab ]; then
+			/usr/sbin/mkitab "NILESSE:23:once:$ssehome/S99ssed start > /dev/null 2>&1"
+			if [ $? -ne 0 ]; then
+				error
+			fi
+		else
+			$ECHO "\n Registration of inittab is failed."
+			$ECHO "\n There is no file /usr/sbin/mkitab."
+			$ECHO "\n Please find mkitab file and register it in inittab."
+			$ECHO "\n mkitab \"NILESSE:23:once:$ssehome/S99ssed start > /dev/null 2>&1\""
+		fi
+
+		$ECHO '#!/bin/sh' > $ssehome/S99ssed
+		if [ $? -ne 0 ]; then
+			error
+		fi
+
+cat << EOF >> $ssehome/S99ssed
+#ident "@(#)SSE Agent"
+# System Security Explorer(SSE) Agent
+SGHOME=$ssehome export SGHOME
+RETVAL=0
+SSEDSTAT=0
+PORTSTAT=0
+
+kill_proc()
+{
+	echo "terminating \$1 ..."
+        /bin/ps -e | grep "\$1" | grep -v "grep" | \\
+		awk '{ print \$1 }' | xargs kill 2> /dev/null
+	if [ \$? != 0 ]; then
+		/bin/ps -e | grep "\$1" | grep -v "grep" | \\
+			awk '{ print \$1 }' | xargs kill -9 2> /dev/null
+	fi
+	return \$?
+}
+
+case "\$1" in
+'start')
+        SSEDSTAT=\`/bin/ps -e|grep "ssed" |grep -v "grep" | wc -l\` 2> /dev/null
+        PORTSTAT=\`netstat -an | grep "$porta" | wc -l\` 2> /dev/null
+
+
+        if [ \$SSEDSTAT != 0 ] ; then
+               echo " ssed is already running !!!"
+
+        elif [ \$PORTSTAT != 0 ]; then
+                echo " $porta port is used.   ssed can not start !!!"
+        
+        else
+                ulimit -n 1024
+                cd \$SGHOME
+                \$SGHOME/bin/ssed
+                sleep 1
+        fi
+        echo
+        ;;
+'stop')
+	kill_proc 'ssed'
+	if [ \$? != 0 ]; then
+		echo " ssed NOT terminated !!!"
+		RETVAL=\$?
+	fi
+	echo
+        ;;
+*)
+        $ECHO "Usage: \$0 { start | stop }\n"
+        ;;
+esac
+
+exit \$RETVAL
+EOF
+		chmod 700 $ssehome/S99ssed 2> /dev/null
+		$ECHO "complete"
+	else
+		if $ECHO $osname | grep '^FREE*' > /dev/null ; then
+			rcfile=$ssehome/S99ssed.sh 
+			PS="ps -x"
+		else
+			rcfile=$ssehome/S99ssed 
+			PS="ps -e"
+		fi
+		$ECHO "\n*** Create RC file($rcfile) for SSE Agent..."
+		if $ECHO $osname | grep '^SUPERUX*' > /dev/null ; then
+			$ECHO '#!/sbin/ksh' > $rcfile
+		else
+			$ECHO '#!/bin/sh' > $rcfile
+		fi
+		if [ $? -ne 0 ]; then
+			error
+		fi
+
+cat << EOF >> $rcfile
+#ident "@(#)SSE Agent"
+# System Security Explorer(SSE) Agent
+SGHOME=$ssehome export SGHOME
+RETVAL=0
+SSEDSTAT=0
+PORTSTAT=0
+
+kill_proc()
+{
+	echo "terminating \$1 ..."
+        /bin/$PS | grep "\$1" | grep -v "grep" | \\
+		awk '{ print \$1 }' | xargs kill 2> /dev/null
+	if [ \$? != 0 ]; then
+		/bin/$PS | grep "\$1" | grep -v "grep" | \\
+			awk '{ print \$1 }' | xargs kill -9 2> /dev/null
+	fi
+	return \$?
+}
+
+case "\$1" in
+'start')
+        SSEDSTAT=\`/bin/$PS |grep "ssed" | grep -v "grep" | grep -v "S99ssed" | grep -v "ssedw" | wc -l\` 2> /dev/null
+	if [ -f /usr/sbin/ss ]; then
+        	PORTSTAT=\`/usr/sbin/ss -ant | grep "$porta" | grep -i "LISTEN" | wc -l\` 2> /dev/null
+	elif [ -f /bin/ss ]; then
+        	PORTSTAT=\`/bin/ss -ant | grep "$porta" | grep -i "LISTEN" | wc -l\` 2> /dev/null
+	else
+        	PORTSTAT=\`netstat -an | grep "$porta" | wc -l\` 2> /dev/null
+	fi
+
+
+        if [ \$SSEDSTAT != 0 ] ; then
+               echo " ssed is already running !!!"
+
+        elif [ \$PORTSTAT != 0 ]; then
+                echo " $porta port is used.   ssed can not start !!!"
+        
+        else
+                ulimit -n 1024
+                cd \$SGHOME
+                \$SGHOME/bin/ssed
+                sleep 1
+        fi
+        echo
+        ;;
+'stop')
+	kill_proc 'ssed'
+	if [ \$? != 0 ]; then
+		echo " ssed NOT terminated !!!"
+		RETVAL=\$?
+	fi
+	echo
+        ;;
+*)
+        $ECHO "Usage: \$0 { start | stop }\n"
+        ;;
+esac
+
+exit \$RETVAL
+EOF
+		chmod 700 $rcfile 2> /dev/null
+
+		if $ECHO $osname | grep '^FREE*' > /dev/null ; then
+			cp $rcfile $rcdir/S99ssed.sh
+		else
+			if [ $SYTEMCTL_USE -eq 0 ];then
+				cp $rcfile $rcdir/S99ssed
+			fi
+		fi
+		
+		$ECHO "Complete"
+	fi
+	# set File permissions
+	chmod -R 700 $ssehome 2> /dev/null
+	chown -R root $ssehome 2> /dev/null
+	chgrp -R sys $ssehome 2> /dev/null
+
+        # systemd service
+	if [ -f /bin/systemctl ]; then
+		SYSTEMCTL='/bin/systemctl'
+	elif [ -f /usr/bin/systemctl ]; then
+		SYSTEMCTL='/usr/bin/systemctl'
+	fi
+	if [ -d /usr/lib/systemd/system ] || [ -d /etc/systemd/system ]; then
+ 		if [ -f $SYSTEMCTL ]; then
+       	        	if [ -f /usr/lib/systemd/system/ssed.service ]; then
+       	        		$ECHO "*** The /usr/lib/systemd/system/ssed.service file already exists."
+						error
+                	elif [ -f /etc/systemd/system/ssed.service ]; then
+						$ECHO "*** The /etc/systemd/system/ssed.service file already exists."
+						error
+			else
+				if [ -d /usr/lib/systemd/system ]; then
+                        		SERVICE_FILE=/usr/lib/systemd/system/ssed.service
+                        		SERVICE_NAME=ssed.service
+				elif [ -d /etc/systemd/system ]; then
+       	        			SERVICE_FILE=/etc/systemd/system/ssed.service
+       	                		SERVICE_NAME=ssed.service
+				fi
+                	fi
+                	$ECHO "[Unit]" > $SERVICE_FILE
+                	$ECHO "Description=Secuguard System Explorer(SSE)" >> $SERVICE_FILE
+                	$ECHO >> $SERVICE_FILE
+                	$ECHO "[Service]" >> $SERVICE_FILE
+                	$ECHO "Type=forking" >> $SERVICE_FILE
+					$ECHO "ExecStart=/bin/sh -c 'count=0; while [ \$count -ne 10 ] ; do if [ -f $ssehome/S99ssed ] ; then $ssehome/S99ssed start; break; else sleep 1; count=\$((\$count+1)); fi; done;'" >> $SERVICE_FILE
+                	$ECHO "ExecStop=$ssehome/S99ssed stop" >> $SERVICE_FILE
+                	$ECHO >> $SERVICE_FILE
+                	$ECHO "[Install]" >> $SERVICE_FILE
+                	$ECHO "WantedBy=multi-user.target" >> $SERVICE_FILE
+
+                	$ECHO "\n*** Secuguard SSE systemd Service Start...\n"
+                	$SYSTEMCTL enable $SERVICE_NAME
+        	fi
+	fi
+
+	#Create remove script
+	rmfile=$ssehome/bin/SSE_UNINSTALL
+	$ECHO '#! /bin/sh' > $rmfile
+
+	$ECHO "$ECHO \"\\\n*** Delete SSE Agent. Continue? (y/n) \\\c\"" >> $rmfile
+	$ECHO 'read answer' >> $rmfile
+	$ECHO 'if [ "$answer" = "y" ]; then' >> $rmfile
+
+	if [ -d /usr/lib/systemd/system ] || [ -d /etc/systemd/system ]; then
+        	if [ -f $SERVICE_FILE ]; then
+                	$ECHO " $SYSTEMCTL disable $SERVICE_NAME" >> $rmfile
+                	$ECHO " /bin/rm $SERVICE_FILE" >> $rmfile
+                	$ECHO " $SYSTEMCTL daemon-reload" >> $rmfile
+        	fi
+	fi
+
+	if $ECHO $osname | grep '^AIX*' > /dev/null ; then
+		$ECHO "	sh $ssehome/S99ssed stop" >> $rmfile
+		$ECHO ' if [ -f /usr/sbin/rmitab ]; then' >> $rmfile
+		$ECHO "		/usr/sbin/rmitab NILESSE 2>/dev/null" >> $rmfile
+		$ECHO ' if [ $? -ne 0 ]; then' >> $rmfile
+		$ECHO "		$ECHO \"\\Removing inittab with rmitab failed. Check inittab.\\n\"" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO " else" >> $rmfile
+		$ECHO "$ECHO \"\\t*** SSE script is registered in /etc/inittab.\\n\\t There is no /usr/sbin/rmitab file.\\n\"" >> $rmfile
+		$ECHO "$ECHO \"\\tPlease also remove the registered SSE script.\\n\"" >> $rmfile
+		$ECHO "$ECHO \"\\tYou can remove it as shown below.\\n\\tIf you want to modify the contents of inittab file, please use rmitab command.\\n\"" >> $rmfile
+		$ECHO "$ECHO \"		NILESSE:23:once:$ssehome/S99ssed start > /dev/null 2>&1\\n\"" >> $rmfile
+		$ECHO " fi" >> $rmfile
+	elif $ECHO $osname | grep '^DEBIAN*' > /dev/null ; then
+		$ECHO "	sh $rcfile stop" >> $rmfile
+		$ECHO "	/bin/rm $rcdir/S99ssed" >> $rmfile
+		$ECHO ' if [ -h /etc/rc2.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc2.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -h /etc/rc3.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc3.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -h /etc/rc5.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc5.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+	elif $ECHO $osname | grep '^HP*' > /dev/null ; then
+		$ECHO "	sh $rcfile stop" >> $rmfile
+		$ECHO "	/bin/rm $rcdir/S99ssed" >> $rmfile
+		$ECHO ' if [ -h /sbin/rc2.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /sbin/rc2.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -h /sbin/rc3.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /sbin/rc3.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+	else
+		$ECHO "	sh $rcfile stop" >> $rmfile
+		$ECHO "	/bin/rm $rcdir/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO ' if [ -h /etc/rc.d/rc2.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc.d/rc2.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -h /etc/rc.d/rc3.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc.d/rc3.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -h /etc/rc.d/rc5.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc.d/rc5.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -h /etc/rc.d/init.d/S99ssed ]; then' >> $rmfile
+		$ECHO "		/bin/rm /etc/rc.d/init.d/S99ssed 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+		$ECHO ' if [ -x /usr/local/etc/rc.d/S99ssed.sh ]; then' >> $rmfile
+		$ECHO "		/bin/rm /usr/local/etc/rc.d/S99ssed.sh 2>/dev/null" >> $rmfile
+		$ECHO " fi" >> $rmfile
+	fi
+	$ECHO "	/bin/rm -r $ssehome 2>/dev/null" >> $rmfile
+	$ECHO "$ECHO \"\\\n*** Deleted SSE Agent.\\\n\"" >> $rmfile
+	$ECHO "fi" >> $rmfile
+	chmod 700 $rmfile
+
+	ln -s $rmfile $ssehome/remove
+
+	return 0
+}
+
+link_s99ssed()
+{
+	if [ -f /bin/systemctl ]; then
+		SYTEMCTL_USE=1
+	elif [ -f /usr/bin/systemctl ]; then
+		SYTEMCTL_USE=1
+	fi
+
+	if [ $SYTEMCTL_USE -eq 0 ];then
+		if $ECHO $osname | grep '^DEBIAN*' > /dev/null ; then
+			if [ -d /etc/rc2.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc2.d/S99ssed
+			fi
+			if [ -d /etc/rc3.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc3.d/S99ssed
+			fi
+			if [ -d /etc/rc5.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc5.d/S99ssed
+			fi
+		elif $ECHO $osname | grep '^HP*' > /dev/null ; then
+			if [ -d /sbin/rc2.d ]; then
+				ln -s $rcdir/S99ssed /sbin/rc2.d/S99ssed
+			fi
+		else
+			if [ -d /etc/rc.d/rc2.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc.d/rc2.d/S99ssed
+			elif [ -d /etc/rc2.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc2.d/S99ssed
+			fi
+			
+			if [ -d /etc/rc.d/rc3.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc.d/rc3.d/S99ssed
+			elif [ -d /etc/rc3.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc3.d/S99ssed
+			fi
+			
+			if [ -d /etc/rc.d/rc5.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc.d/rc5.d/S99ssed
+			elif [ -d /etc/rc5.d ]; then
+				ln -s $rcdir/S99ssed /etc/rc5.d/S99ssed
+			fi
+		fi
+	fi
+}
+
+
+###### main ######
+#insdir=/opt
+rcdir=/etc/rc.d/rc3.d
+
+OS="unknown"
+UNAME=`uname`
+UNAMER=`uname -r`
+UNAMEM=`uname -m`
+#XEN=`cat /etc/os-release | grep -i "xen" | wc -l`
+RHEV=`cat /etc/os-release | grep -i "red hat virtualization" | wc -l`
+UBUNTU=`cat /etc/os-release | grep -i "ubuntu" | wc -l`
+DEBIAN=`cat /etc/os-release | grep -i "debian" | wc -l`
+SUSE=`cat /etc/os-release | grep -i "suse" | wc -l`
+ALPINE=`cat /etc/os-release | grep -i "Alpine" | wc -l`
+AMAZON=`cat /etc/os-release | grep -i "Amazon" | wc -l`
+if [ "$UNAME" = 'Linux' ]; then
+	LINUXBIT=`getconf LONG_BIT`
+fi
+if [ "$UNAME" = 'AIX' ]; then
+    OSLEVEL=`oslevel`
+fi
+if [ "$UNAME" = 'SunOS' ]; then
+    UNAMEP=`uname -p`
+fi
+
+if [ "$AMAZON" -gt 0 ] && [ "$UNAMEM" = 'aarch64' ]; then
+	rcdir=/etc/rc.d/init.d
+	case "$UNAMER" in
+		4.*)
+			osname="AMAZON2"
+			osid=206000;;
+		5.*)
+			osname="AMAZON2"
+			osid=207000;;
+		6.*)
+			osname="AMAZON2"
+			osid=208000;;
+		7.*)
+			osname="AMAZON2"
+			osid=209000;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	insf AMAZON2ARM64
+elif [ "$AMAZON" -gt 0 ] && [ "$UNAMEM" = 'x86_64' ]; then
+	rcdir=/etc/rc.d/init.d
+	case "$UNAMER" in
+		4.*)
+			osname="AMAZON2"
+			osid=206000;;
+		5.*)
+			osname="AMAZON2"
+			osid=207000;;
+		6.*)
+			osname="AMAZON2"
+			osid=208000;;
+		7.*)
+			osname="AMAZON2"
+			osid=209000;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	insf AMAZON2X64
+elif [ "$ALPINE" -gt 0 ] && [ "$LINUXBIT" = '64' ]; then
+	rcdir=/etc/init.d
+	case "$UNAMER" in
+		5.10.*)
+			osname="ALPINE3X64"
+			osid=207100;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	link_s99ssed
+	insf ALPINE64
+
+elif [ "$SUSE" -gt 0 ] && [ "$LINUXBIT" = '32' ]; then
+	if [ -d /etc/rc.d/rc2.d ]; then
+		rcdir=/etc/rc.d/rc2.d
+	elif [ -d /etc/rc2.d ]; then
+		rcdir=/etc/rc2.d
+	fi
+	
+	if [ -d /etc/rc.d/rc3.d ]; then
+		rcdir=/etc/rc.d/rc3.d
+	elif [ -d /etc/rc3.d ]; then
+		rcdir=/etc/rc3.d
+	fi
+	
+	if [ -d /etc/rc.d/rc5.d ]; then
+		rcdir=/etc/rc.d/rc5.d
+	elif [ -d /etc/rc5.d ]; then
+		rcdir=/etc/rc5.d
+	fi
+	case "$UNAMER" in
+		4.12.*)
+			osname="SLES12X32"
+			osid=204020;;
+		5.3.*)
+			osname="SLES15X32"
+			osid=207030;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	#link_s99ssed
+	insf REDHATELX86
+elif [ "$SUSE" -gt 0 ] && [ "$LINUXBIT" = '64' ]; then
+	if [ -d /etc/rc.d/rc2.d ]; then
+		rcdir=/etc/rc.d/rc2.d
+	elif [ -d /etc/rc2.d ]; then
+		rcdir=/etc/rc2.d
+	fi
+	
+	if [ -d /etc/rc.d/rc3.d ]; then
+		rcdir=/etc/rc.d/rc3.d
+	elif [ -d /etc/rc3.d ]; then
+		rcdir=/etc/rc3.d
+	fi
+	
+	if [ -d /etc/rc.d/rc5.d ]; then
+		rcdir=/etc/rc.d/rc5.d
+	elif [ -d /etc/rc5.d ]; then
+		rcdir=/etc/rc5.d
+	fi
+	case "$UNAMER" in
+		4.12.*)
+			osname="SLES12X64"
+			osid=204020;;
+		5.3.*)
+			osname="SLES15X64"
+			osid=207030;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	#link_s99ssed
+	insf REDHATELX64
+
+elif [ "$UBUNTU" -gt 0 ] && [ "$LINUXBIT" = '64' ]; then
+	rcdir=/etc/init.d
+        case "$UNAMER" in
+				4.14.*) osname="UBUNTU16X64"
+						osid="206140";;			
+						
+				4.15.*) osname="UBUNTU16X64"
+						osid="206150";;	
+						
+				4.16.*) osname="UBUNTU16X64"
+						osid="206160";;	
+						
+				4.17.*) osname="UBUNTU16X64"
+						osid="206170";;	
+
+				4.18.*) osname="UBUNTU16X64"
+						osid="206180";;	
+					
+				4.1.*) osname="UBUNTU16X64"
+						osid="206010";;
+						
+				4.2.*) osname="UBUNTU16X64"
+						osid="206020";;
+						
+				4.3.*) osname="UBUNTU16X64"
+						osid="206030";;
+						
+				4.4.*) osname="UBUNTU16X64"
+						osid="206040";;
+						
+				4.5.*) osname="UBUNTU16X64"
+						osid="206050";;
+			
+				4.6.*) osname="UBUNTU16X64"
+						osid="206060";;
+					
+				4.7.*) osname="UBUNTU16X64"
+						osid="206070";;
+						
+				4.8.*) osname="UBUNTU16X64"
+						osid="206080";;
+						
+				4.9.*) osname="UBUNTU16X64"
+						osid="206090";;
+
+				5.4.*) osname="UBUNTU16X64"
+						osid="207040";;
+
+				5.15.*) osname="UBUNTU16X64"
+						osid="207150";;
+						
+		*)	$ECHO "This is an unknown OS version."
+			osname="UBUNTU16X64"
+						osid="200000";;
+			#error;;
+        esac
+
+	link_s99ssed
+	insf UBUNTU16X64
+elif [ "$DEBIAN" -gt 0 ] && [ "$LINUXBIT" = '64' ]; then
+	rcdir=/etc/init.d
+	case "$UNAMER" in
+		3.2.*)
+			osname="DEBIAN76X64"
+			osid=204020;;
+		3.16.*)
+			osname="DEBIAN87X64"
+			osid=204020;;
+		4.19.*)
+			osname="DEBIAN10X64"
+			osid=206190;;			
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	link_s99ssed
+	insf DEBIANX64
+elif [ "$DEBIAN" -gt 0 ] && [ "$LINUXBIT" = '32' ]; then
+	rcdir=/etc/init.d
+	case "$UNAMER" in
+		3.2.*)
+			osname="DEBIAN76X86"
+			osid=204020;;
+		4.19.*)
+			osname="DEBIAN10X86"
+			osid=206190;;			
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+	esac
+	link_s99ssed
+	insf DEBIANX86
+#elif [ "$XEN" -gt 0 ]; then
+#	rcdir=/etc/rc.d/init.d
+#	osname="XENSERVER"
+#	osid=205200
+#	link_s99ssed
+#	insf XENSERVER
+	
+#elif [ "$UNAME" = 'Linux' ] && [ "$UNAMEM" = 'ppc64' ] && [ "$LINUXBIT" = '64' ]; then
+#	rcdir=/etc/rc.d/init.d
+#	osname="REDHATEL7PPC"
+#	osid=204100
+#	link_s99ssed
+#	insf REDHATPPC64
+	
+elif [ "$UNAME" = 'Linux' ] && [ "$LINUXBIT" = '64' ]; then
+	rcdir=/etc/rc.d/init.d
+        case "$UNAMER" in
+                *.fc3*) osname="FEDORA30X64"
+			osid=208000;;
+                *.el9*) osname="REDHATEL9X64"
+			osid=207140;;
+                *.el8*) osname="REDHATEL8X64"
+			osid=206180;;
+                *.el7*) osname="REDHATEL7X64"
+			osid=204100;;
+                *.el6*) osname="REDHATEL6X64"
+			osid=202110;;
+                *.el5*) osname="REDHATEL5X64"
+			osid=202110;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+        esac
+	if [ "$RHEV" -gt 0 ]; then
+		osname="RHEV"
+		osid=205100
+	fi
+	link_s99ssed
+	if [ "$RHEV" -gt 0 ]; then
+		insf RHEV
+	else
+		insf REDHATELX64
+	fi
+elif [ "$UNAME" = 'Linux' ] && [ "$LINUXBIT" = '32' ]; then
+	rcdir=/etc/rc.d/init.d
+        case "$UNAMER" in
+                *.el6*) osname="REDHATEL6X86"
+			osid=202110;;
+                *.el5*) osname="REDHATEL5X86"
+			osid=202110;;
+		*)	$ECHO "This is an unsupported OS version."
+			error;;
+        esac
+	link_s99ssed
+	insf REDHATELX86
+elif [ "$UNAME" = 'AIX' ]; then
+        case "$OSLEVEL" in
+                7.2.0.0) osname="AIX7200"
+			 osid=103062;;
+                7.1.0.0) osname="AIX7100"
+			 osid=103061;;
+                6.1.0.0) osname="AIX6100"
+			 osid=103051;;
+                5.3.0.0) osname="AIX5300"
+			 osid=103040;;
+                5.2.0.0) osname="AIX5200"
+			 osid=103032;;
+		*)	 osname="AIX5200"
+			 osid=103000;;
+        esac
+	insf AIX 
+elif [ "$UNAME" = 'SunOS' ] && [ "$UNAMEP" = 'sparc' ]; then
+	rcdir=/etc/rc2.d
+        case "$UNAMER" in
+                5.11) osname="SOL211"
+		      osid=101023;;
+                5.10) osname="SOL210"
+		      osid=101022;;
+                5.9)  osname="SOL29"
+		      osid=101021;;
+                5.8)  osname="SOL28"
+		      osid=101018;;
+		*)    osname="SOL28"
+		      osid=101000;;
+        esac
+	insf SOL
+elif [ "$UNAME" = 'SunOS' ] && [ "$UNAMEP" != 'sparc' ]; then
+	rcdir=/etc/rc2.d
+        case "$UNAMER" in
+                5.11) osname="SOL211I"
+		      osid=102013;;
+                5.10) osname="SOL210I"
+		      osid=102012;;
+                5.9)  osname="SOL29I"
+		      osid=102011;;
+		*)    osname="SOL29I"
+		      osid=102000;;
+        esac
+	insf SOLI
+elif [ "$UNAME" = 'HP-UX' ] && [ "$UNAMEM" = 'ia64' ]; then
+	rcdir=/sbin/init.d
+        case "$UNAMER" in
+                B.11.31) osname="HP1131IA64"
+			 osid=106062;;
+                B.11.23) osname="HP1123IA64"
+			 osid=106061;;
+		*)	 osname="HP1123IA64"
+			 osid=106000;;
+        esac
+        case "$UNAMER" in
+                B.11.31) insf HP1131IA64
+					;;
+                B.11.23) insf HP1123IA64
+					;;
+		*)	$ECHO "*** OS failed."
+			error
+					;;
+        esac
+		link_s99ssed
+elif [ "$UNAME" = 'HP-UX' ] && [ "$UNAMEM" != 'ia64' ]; then
+	rcdir=/sbin/init.d
+        case "$UNAMER" in
+                B.11.31) osname="HP1131B64S800"
+			 osid=106062;;
+                B.11.23) osname="HP1123B64S800"
+			 osid=106061;;
+                B.11.11) osname="HP1111B64S800"
+			 osid=106057;;
+		*)	 osname="HP1111B64S800"
+			 osid=106000;;
+        esac
+	link_s99ssed
+	insf HPUX
+else
+	$ECHO "*** OS failed."
+	error
+fi
+
+ssehome=$insdir/SSExplorer
+if [ -d $ssehome ]; then
+	complete
+fi
+###### end main ###### 
